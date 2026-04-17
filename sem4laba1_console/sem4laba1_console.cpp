@@ -5,18 +5,11 @@
 #include "Parsers.h"
 #include <locale.h>
 
-#include <direct.h>
-
 
 using namespace std;
 
 int main()
 {
-    char cwd[1024];
-    _getcwd(cwd, sizeof(cwd));
-    cout << "Current working directory: " << cwd << endl;
-
-
     setlocale(LC_ALL, "Russian");
     SetConsoleCP(1251);
     SetConsoleOutputCP(1251);
