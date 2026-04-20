@@ -648,167 +648,116 @@ void cmdTruncate(DataBase& db) {
     if (!db.items_file || !db.spec_file)
         throw runtime_error("Файлы не открыты");
 
-    // --- 1. Обработка файла изделий ---
-    // Создаём временный файл
-    char tempItemsPath[L_tmpnam];
-    tmpnam(tempItemsPath);  // получили уникальное имя
-    FILE* tempItems = fopen(tempItemsPath, "wb+");
-    if (!tempItems) throw runtime_error("Не удалось создать временный файл для изделий");
-
-    // Копируем заголовок (пока с теми же значениями, но позже обновим)
-    ItemsHeader newItemsHeader = db.items_header;
-    if (fwrite(&newItemsHeader, sizeof(ItemsHeader), 1, tempItems) != 1) {
-        fclose(tempItems);
-        remove(tempItemsPath);
-        throw runtime_error("Ошибка записи заголовка во временный файл");
-    }
-
-    // Карта соответствия старых смещений новым
-    map<int32_t, int32_t> itemOffsetMap;
-    vector<int32_t> newItemOffsets;  // последовательность новых смещений активных записей
-
+    vector<ItemRecord> activeItems;
+    vector<int32_t> oldItemOffsets;
     int32_t cur = db.items_header.pointer_to_first_record;
-    int32_t newPos = sizeof(ItemsHeader);
-    int32_t firstActive = -1;
-    int32_t prevNew = -1;
-
     while (cur != -1) {
-        // Читаем запись из старого файла
         ItemRecord rec = readItemRecord(db, cur);
-        int32_t nextOld = rec.pointer_to_next_record;  // запоминаем для перехода
-
         if (rec.deleted == 0) {
-            // Активная запись – записываем во временный файл
-            itemOffsetMap[cur] = newPos;
-            newItemOffsets.push_back(newPos);
-
-            // Запись полей (deleted, pointer_to_spec_record, pointer_to_next_record пока оставляем старые)
-            fseek(tempItems, newPos, SEEK_SET);
-            fwrite(&rec.deleted, 1, 1, tempItems);
-            fwrite(&rec.pointer_to_spec_record, 4, 1, tempItems);
-            // pointer_to_next_record будет исправлен позже, пока пишем -1
-            int32_t dummy = -1;
-            fwrite(&dummy, 4, 1, tempItems);
-            // Данные
-            string data = rec.data;
-            if (data.length() < db.items_header.data_lenght)
-                data.append(db.items_header.data_lenght - data.length(), ' ');
-            fwrite(data.c_str(), db.items_header.data_lenght, 1, tempItems);
-
-            // Для первого активного запоминаем
-            if (firstActive == -1) firstActive = newPos;
-
-            // Связываем предыдущую активную с текущей (пока в prevNew)
-            if (prevNew != -1) {
-                fseek(tempItems, prevNew + 5, SEEK_SET); // смещение до next_item_offset
-                fwrite(&newPos, 4, 1, tempItems);
-            }
-            prevNew = newPos;
-            newPos += 1 + 4 + 4 + db.items_header.data_lenght;
+            activeItems.push_back(rec);
+            oldItemOffsets.push_back(cur);
         }
-        cur = nextOld;
+        cur = rec.pointer_to_next_record;
     }
 
-    // Обновляем заголовок временного файла
-    newItemsHeader.pointer_to_first_record = firstActive;
-    newItemsHeader.pointer_to_free_memory = newPos;
-    fseek(tempItems, 0, SEEK_SET);
-    fwrite(&newItemsHeader, sizeof(ItemsHeader), 1, tempItems);
-    fflush(tempItems);
-
-    // --- 2. Обработка файла спецификаций ---
-    char tempSpecsPath[L_tmpnam];
-    tmpnam(tempSpecsPath);
-    FILE* tempSpecs = fopen(tempSpecsPath, "wb+");
-    if (!tempSpecs) {
-        fclose(tempItems);
-        remove(tempItemsPath);
-        throw runtime_error("Не удалось создать временный файл для спецификаций");
-    }
-
-    SpecHeader newSpecHeader = db.spec_header;
-    if (fwrite(&newSpecHeader, sizeof(SpecHeader), 1, tempSpecs) != 1) {
-        fclose(tempItems); remove(tempItemsPath);
-        fclose(tempSpecs); remove(tempSpecsPath);
-        throw runtime_error("Ошибка записи заголовка спецификаций");
-    }
-
-    map<int32_t, int32_t> specOffsetMap;
-    vector<int32_t> newSpecOffsets;
-    int32_t curSpec = db.spec_header.pointer_to_first_record;
-    int32_t newSpecPos = sizeof(SpecHeader);
-    int32_t firstActiveSpec = -1;
-    int32_t prevNewSpec = -1;
-
-    while (curSpec != -1) {
-        SpecRecord rec = readSpecRecord(db, curSpec);
-        int32_t nextOldSpec = rec.pointer_to_next_record;
-
+    vector<SpecRecord> activeSpecs;
+    vector<int32_t> oldSpecOffsets;
+    cur = db.spec_header.pointer_to_first_record;
+    while (cur != -1) {
+        SpecRecord rec = readSpecRecord(db, cur);
         if (rec.deleted == 0) {
-            specOffsetMap[curSpec] = newSpecPos;
-            newSpecOffsets.push_back(newSpecPos);
-
-            // Корректируем item_offset, если он указывает на компонент, который был перемещён
-            if (itemOffsetMap.find(rec.pointer_to_item_record) != itemOffsetMap.end())
-                rec.pointer_to_item_record = itemOffsetMap[rec.pointer_to_item_record];
-            else {
-                // Если компонент не найден в карте (например, он был удалён физически?), но такого быть не должно,
-                // так как спецификация ссылается только на активные компоненты. Если ссылка на удалённый – оставляем как есть?
-                // По логике, если компонент был удалён логически, то его спецификации тоже удалены, и они не должны попасть сюда.
-                // Поэтому считаем, что все ссылки валидны.
-            }
-
-            fseek(tempSpecs, newSpecPos, SEEK_SET);
-            fwrite(&rec.deleted, 1, 1, tempSpecs);
-            fwrite(&rec.pointer_to_item_record, 4, 1, tempSpecs);
-            fwrite(&rec.quantity, 2, 1, tempSpecs);
-            // next_spec_offset пока временно -1
-            int32_t dummy = -1;
-            fwrite(&dummy, 4, 1, tempSpecs);
-
-            if (firstActiveSpec == -1) firstActiveSpec = newSpecPos;
-
-            if (prevNewSpec != -1) {
-                fseek(tempSpecs, prevNewSpec + 1 + 4 + 2, SEEK_SET); // смещение до next_spec_offset
-                fwrite(&newSpecPos, 4, 1, tempSpecs);
-            }
-            prevNewSpec = newSpecPos;
-            newSpecPos += 1 + 4 + 2 + 4;
+            activeSpecs.push_back(rec);
+            oldSpecOffsets.push_back(cur);
         }
-        curSpec = nextOldSpec;
+        cur = rec.pointer_to_next_record;
     }
 
-    // Обновляем заголовок спецификаций
-    newSpecHeader.pointer_to_first_record = firstActiveSpec;
-    newSpecHeader.pointer_to_free_memory = newSpecPos;
-    fseek(tempSpecs, 0, SEEK_SET);
-    fwrite(&newSpecHeader, sizeof(SpecHeader), 1, tempSpecs);
-    fflush(tempSpecs);
-
-    // --- 3. Замена старых файлов новыми ---
-    // Закрываем все файлы
     fclose(db.items_file);
     fclose(db.spec_file);
     db.items_file = nullptr;
     db.spec_file = nullptr;
 
-    // Удаляем старые файлы
     remove(db.items_filename.c_str());
     remove(db.spec_filename.c_str());
 
-    // Переименовываем временные
-    rename(tempItemsPath, db.items_filename.c_str());
-    rename(tempSpecsPath, db.spec_filename.c_str());
-
-    // Открываем заново
-    db.items_file = fopen(db.items_filename.c_str(), "rb+");
-    db.spec_file = fopen(db.spec_filename.c_str(), "rb+");
+    // Создание новых файлов
+    db.items_file = fopen(db.items_filename.c_str(), "wb+");
+    db.spec_file = fopen(db.spec_filename.c_str(), "wb+");
     if (!db.items_file || !db.spec_file)
-        throw runtime_error("Не удалось переоткрыть файлы после Truncate");
+        throw runtime_error("Не удалось создать новые файлы");
 
-    // Читаем обновлённые заголовки
-    fread(&db.items_header, sizeof(ItemsHeader), 1, db.items_file);
-    fread(&db.spec_header, sizeof(SpecHeader), 1, db.spec_file);
+    ItemsHeader newItemsHeader = db.items_header;
+    newItemsHeader.pointer_to_first_record = -1;
+    newItemsHeader.pointer_to_free_memory = sizeof(ItemsHeader);
+    fseek(db.items_file, 0, SEEK_SET);
+    fwrite(&newItemsHeader, sizeof(ItemsHeader), 1, db.items_file);
+
+    SpecHeader newSpecHeader = db.spec_header;
+    newSpecHeader.pointer_to_first_record = -1;
+    newSpecHeader.pointer_to_free_memory = sizeof(SpecHeader);
+    fseek(db.spec_file, 0, SEEK_SET);
+    fwrite(&newSpecHeader, sizeof(SpecHeader), 1, db.spec_file);
+
+    // Записываем активные записи изделий
+    map<int32_t, int32_t> newItemOffsets;
+    int32_t newOffset = sizeof(ItemsHeader);
+    for (size_t i = 0; i < activeItems.size(); ++i) {
+        newItemOffsets[oldItemOffsets[i]] = newOffset;
+        fseek(db.items_file, newOffset, SEEK_SET);
+        fwrite(&activeItems[i].deleted, 1, 1, db.items_file);
+        fwrite(&activeItems[i].pointer_to_spec_record, 4, 1, db.items_file);
+        int32_t dummy = -1;
+        fwrite(&dummy, 4, 1, db.items_file);
+        string data = activeItems[i].data;
+        if (data.length() < db.items_header.data_lenght)
+            data.append(db.items_header.data_lenght - data.length(), ' ');
+        fwrite(data.c_str(), db.items_header.data_lenght, 1, db.items_file);
+        newOffset += 1 + 4 + 4 + db.items_header.data_lenght;
+    }
+    for (size_t i = 0; i < activeItems.size(); ++i) {
+        int32_t curNewOff = newItemOffsets[oldItemOffsets[i]];
+        int32_t nextNewOff = (i + 1 < activeItems.size()) ? newItemOffsets[oldItemOffsets[i + 1]] : -1;
+        fseek(db.items_file, curNewOff + 5, SEEK_SET);
+        fwrite(&nextNewOff, 4, 1, db.items_file);
+    }
+    // Обновляем заголовок изделий
+    newItemsHeader.pointer_to_first_record = activeItems.empty() ? -1 : newItemOffsets[oldItemOffsets[0]];
+    newItemsHeader.pointer_to_free_memory = newOffset;
+    fseek(db.items_file, 0, SEEK_SET);
+    fwrite(&newItemsHeader, sizeof(ItemsHeader), 1, db.items_file);
+    db.items_header = newItemsHeader;
+
+    map<int32_t, int32_t> newSpecOffsets;
+    newOffset = sizeof(SpecHeader);
+    for (size_t i = 0; i < activeSpecs.size(); ++i) {
+        newSpecOffsets[oldSpecOffsets[i]] = newOffset;
+        fseek(db.spec_file, newOffset, SEEK_SET);
+        fwrite(&activeSpecs[i].deleted, 1, 1, db.spec_file);
+        int32_t itemOff = activeSpecs[i].pointer_to_item_record;
+        if (newItemOffsets.find(itemOff) != newItemOffsets.end())
+            itemOff = newItemOffsets[itemOff];
+        fwrite(&itemOff, 4, 1, db.spec_file);
+        fwrite(&activeSpecs[i].quantity, 2, 1, db.spec_file);
+        int32_t dummy = -1;
+        fwrite(&dummy, 4, 1, db.spec_file);
+        newOffset += 11;
+    }
+    
+    for (size_t i = 0; i < activeSpecs.size(); ++i) {
+        int32_t curNewOff = newSpecOffsets[oldSpecOffsets[i]];
+        int32_t nextNewOff = (i + 1 < activeSpecs.size()) ? newSpecOffsets[oldSpecOffsets[i + 1]] : -1;
+        fseek(db.spec_file, curNewOff + 1 + 4 + 2, SEEK_SET);
+        fwrite(&nextNewOff, 4, 1, db.spec_file);
+    }
+
+    newSpecHeader.pointer_to_first_record = activeSpecs.empty() ? -1 : newSpecOffsets[oldSpecOffsets[0]];
+    newSpecHeader.pointer_to_free_memory = newOffset;
+    fseek(db.spec_file, 0, SEEK_SET);
+    fwrite(&newSpecHeader, sizeof(SpecHeader), 1, db.spec_file);
+    db.spec_header = newSpecHeader;
+
+    fflush(db.items_file);
+    fflush(db.spec_file);
 
     cout << "Truncate выполнен успешно." << endl;
 }

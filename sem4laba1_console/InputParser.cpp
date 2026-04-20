@@ -8,7 +8,14 @@ void inputParser(string input, DataBase& data_base)
     size_t end = input.find(delim);
 
     string command = input.substr(0, end);
-    string args = input.substr(end + 1);
+
+    string args;
+    if (end != string::npos) {
+        args = input.substr(end + 1);
+    }
+    else {
+        args.clear();
+    }
 
     if (command == "Create") {
         string filename;
@@ -68,16 +75,11 @@ void inputParser(string input, DataBase& data_base)
         }
     }
     else if (command == "Truncate") {
-        if (args.empty()) {
-            try {
-                cmdTruncate(data_base);
-            }
-            catch (const exception& e) {
-                cout << e.what() << endl;
-            }
+        try {
+            cmdTruncate(data_base);
         }
-        else {
-            cout << "Команда Truncate не принимает аргументов." << endl;
+        catch (const exception& e) {
+            cout << e.what() << endl;
         }
     }
     else if (command == "Input") {

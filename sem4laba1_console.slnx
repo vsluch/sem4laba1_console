@@ -3,5 +3,5 @@
     <Platform Name="x64" />
     <Platform Name="x86" />
   </Configurations>
-  <Project Path="sem4laba1_console/sem4laba1_console.vcxproj" />
+  <Project Path="sem4laba1_console/sem4laba1_console.vcxproj" Id="2be96009-49ae-4cd4-b8a9-9df2a972bf6e" />
 </Solution>
